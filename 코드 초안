@@ -1,0 +1,94 @@
+import pandas as pd
+import numpy as np
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+
+# 1. 데이터 로드
+try:
+    df = pd.read_csv('Alzheimer_DataSet.csv')
+except FileNotFoundError:
+    df = pd.read_csv('/kaggle/input/datasets/sarthakkanjariya/alzheimer-dataset/Alzheimer_DataSet.csv')
+
+# 결측치 대치 (Diagnosis 그룹별 중앙값)
+num_cols = df.select_dtypes(include='number').columns
+for col in num_cols:
+    if df[col].isnull().sum() > 0:
+        df[col] = df.groupby('Diagnosis')[col].transform(lambda x: x.fillna(x.median()))
+        df[col] = df[col].fillna(df[col].median())
+
+# 2. 전처리: 타깃 및 변수 1/0 인코딩
+df['Is_AD'] = (df['Diagnosis'] == 'AD').astype(int)
+df['Is_Male'] = (df['Gender'] == 'Male').astype(int)
+df['Is_Solo'] = df['Marital_status'].isin(['Divorced', 'Never married', 'Widowed']).astype(int)
+
+# -------------------------------------------------------------------
+# [그래프 1] 교란인자를 통제한 상태에서 결혼 여부별 AD 예측 확률
+# ---------------------------------------------------------
+# 'Unknown' 제외, 4가지 주요 상태만 필터링
+main_marital = ['Married', 'Widowed', 'Divorced', 'Never married']
+df_m = df[df['Marital_status'].isin(main_marital)].copy()
+
+# 다변량 로지스틱 회귀 학습
+model_baseline = smf.logit('Is_AD ~ C(Marital_status) + Age + Year_education + Is_Male + High_risk_ApoE4', data=df_m).fit(disp=0)
+
+# 모든 조건을 동일하게(평균값으로) 통제한 '가상의 환자 4명' 생성
+dummy_data = pd.DataFrame({
+    'Marital_status': main_marital,
+    'Age': df_m['Age'].mean(),               # 나이 통제
+    'Year_education': df_m['Year_education'].mean(), # 교육 통제
+    'Is_Male': df_m['Is_Male'].mode()[0],    # 성별 통제
+    'High_risk_ApoE4': df_m['High_risk_ApoE4'].mean() # 유전자 통제
+})
+
+# 통제된 상태에서의 AD 발병 확률(%) 계산
+dummy_data['Predicted_AD_Prob'] = model_baseline.predict(dummy_data) * 100
+
+# -------------------------------------------------------------------
+# [그래프 2 & 3] 가설 1(사별 연령 증폭) & 가설 2(독거 주관적 우울감)
+# ---------------------------------------------------------
+# 가설 1
+widow_df = df[df['Marital_status'] == 'Widowed'].copy()
+widow_df['Age_Group'] = pd.qcut(widow_df['Age'], q=3, labels=['Young', 'Middle', 'Old'])
+ad_ratio = widow_df.groupby('Age_Group')['Diagnosis'].apply(lambda x: (x == 'AD').mean() * 100).reset_index()
+
+# 가설 2
+normal_mmse_df = df[df['MMSE'] >= 28].copy()
+normal_mmse_df['Solo_Label'] = normal_mmse_df['Is_Solo'].map({1: 'Solo-Living', 0: 'Married'})
+smc_ratio = normal_mmse_df.groupby('Solo_Label')['Diagnosis'].apply(lambda x: (x == 'SMC').mean() * 100).reset_index()
+
+# -------------------------------------------------------------------
+# [시각화] 1행 3열 도화지에 순서대로 그리기
+# ---------------------------------------------------------
+sns.set_theme(style='whitegrid', palette='muted')
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+# Plot 1: 기혼자 편향 (모든 변수 통제)
+sns.barplot(x='Marital_status', y='Predicted_AD_Prob', data=dummy_data, ax=axes[0], order=['Married', 'Widowed', 'Divorced', 'Never married'])
+axes[0].set_title('1. Controlled AD Probability by Marital Status', fontweight='bold')
+axes[0].set_ylabel('Predicted AD Probability (%)')
+for i, v in enumerate(dummy_data.set_index('Marital_status').loc[['Married', 'Widowed', 'Divorced', 'Never married']]['Predicted_AD_Prob']):
+    axes[0].text(i, v + 0.3, f'{v:.1f}%', ha='center', fontweight='bold')
+
+# Plot 2: 가설 1 - 사별 스트레스
+sns.barplot(x='Age_Group', y='Diagnosis', data=ad_ratio, ax=axes[1], palette='Reds')
+axes[1].set_title('2. AD Prevalence by Age in Widowed Group', fontweight='bold')
+axes[1].set_ylabel('AD Ratio (%)')
+for i, v in enumerate(ad_ratio['Diagnosis']):
+    axes[1].text(i, v + 0.5, f'{v:.1f}%', ha='center', fontweight='bold')
+
+# Plot 3: 가설 2 - 독거 우울 스트레스
+sns.barplot(x='Solo_Label', y='Diagnosis', data=smc_ratio, ax=axes[2], palette='Blues', order=['Married', 'Solo-Living'])
+axes[2].set_title('3. SMC Ratio in Normal MMSE (>=28)', fontweight='bold')
+axes[2].set_ylabel('SMC Ratio (%)')
+for i, v in enumerate(smc_ratio.set_index('Solo_Label').loc[['Married', 'Solo-Living']]['Diagnosis']):
+    axes[2].text(i, v + 0.2, f'{v:.1f}%', ha='center', fontweight='bold')
+
+# X축 글자 겹치지 않게 기울이기
+for ax in axes:
+    ax.tick_params(axis='x', rotation=45)
+
+plt.tight_layout()
+plt.show()
